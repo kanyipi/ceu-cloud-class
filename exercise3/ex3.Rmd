@@ -1,0 +1,243 @@
+---
+title: "Exercise 3"
+output: html_notebook
+---
+
+rm:
+```{r}
+# latest stable version
+rm(list = ls())
+# install.packages("aws.comprehend", repos = c(cloudyr = "http://cloudyr.github.io/drat", getOption("repos")))
+```
+
+Set up your R w/ AWS
+```{r}
+keyfile <- list.files(path = ".", pattern = "accessKeys.csv", full.names = TRUE)
+if (identical(keyfile, character(0))) {
+  stop("ERROR: AWS key file not found")
+}
+
+keyTable <- read.csv(keyfile, header = T) # *accessKeys.csv == the CSV downloaded from AWS containing your Access & Secret keys
+AWS_ACCESS_KEY_ID <- as.character(keyTable$Access.key.ID)
+AWS_SECRET_ACCESS_KEY <- as.character(keyTable$Secret.access.key)
+
+# activate
+Sys.setenv(
+  "AWS_ACCESS_KEY_ID" = AWS_ACCESS_KEY_ID,
+  "AWS_SECRET_ACCESS_KEY" = AWS_SECRET_ACCESS_KEY,
+  "AWS_DEFAULT_REGION" = "eu-west-1"
+)
+```
+
+
+```{r load}
+
+library("aws.comprehend")
+library("aws.translate")
+library(rvest)
+library(data.table)
+library(tidyverse)
+library(stringr)
+library(stringi)
+```
+
+
+```{r scrape}
+get_one_news <- function(url) {
+  t_list <- list()
+
+  t <- read_html(url)
+  t_list[["title"]] <- t %>%
+    html_node("h1") %>%
+    html_text() %>%
+    trimws()
+  t_list[["date"]] <- t %>%
+    html_nodes(".history--original span") %>%
+    html_text() %>%
+    trimws()
+  t_list[["author"]] <- t %>%
+    html_nodes(".author__name") %>%
+    html_text() %>%
+    trimws()
+  t_list[["huntext"]] <- t %>%
+    html_nodes(".article-html-content div > p") %>%
+    html_text() %>%
+    trimws() %>%
+    paste(collapse = " ")
+  # t_list[['text']] <- t %>% html_node('.article-html-content div > p') %>% html_text() %>% trimws()
+
+  return(t_list)
+}
+
+
+get_links_on_page <- function(url) {
+  t <- read_html(url)
+  rel_links <- t %>%
+    html_nodes(".list-item__title") %>%
+    html_attr("href")
+  links <- paste0("https://telex.hu", rel_links)
+  return(links)
+}
+
+goverment_links <- paste0("https://telex.hu/archivum?oldal=", 1:10, "&term=&filters=%7B%22tags%22%3A%5B%22korm%C3%A1ny%22%5D,%22superTags%22%3A%5B%22Belf%C3%B6ld%22%5D,%22authors%22%3A%5B%5D,%22title%22%3A%5B%5D%7D")
+covid_links <- paste0("https://telex.hu/archivum?oldal=", 1:15, "&term=&filters=%7B%22tags%22%3A%5B%22Magyarorsz%C3%A1g%22%5D,%22superTags%22%3A%5B%22Koronav%C3%ADrus%22%5D,%22authors%22%3A%5B%5D,%22title%22%3A%5B%5D%7D")
+tenis_links <- paste0("https://telex.hu/archivum?oldal=", 1:3, "&term=&filters=%7B%22tags%22%3A%5B%22tenisz%22%5D,%22superTags%22%3A%5B%5D,%22authors%22%3A%5B%5D,%22title%22%3A%5B%5D%7D")
+goverment_links_to_get <- unlist(sapply(goverment_links, get_links_on_page))
+covid_links_to_get <- unlist(sapply(covid_links, get_links_on_page))
+tenis_links_to_get <- unlist(sapply(tenis_links, get_links_on_page))
+data_listg <- lapply(goverment_links_to_get, get_one_news)
+dfg <- rbindlist(data_listg, fill = T)
+data_listc <- lapply(covid_links_to_get, get_one_news)
+dfc <- rbindlist(data_listc, fill = T)
+data_listt <- lapply(tenis_links_to_get, get_one_news)
+dft <- rbindlist(data_listt, fill = T)
+```
+
+```{r filter and claning}
+dfg <- dfg %>% mutate(type = "goverment")
+dfc <- dfc %>% mutate(type = "covid")
+dft <- dft %>% mutate(type = "tennis")
+
+dfjoined <- rbind(dft, rbind(dfg, dfc))
+csvname <- paste0("scrappednews.csv")
+write.csv(dfjoined, csvname)
+
+get_sentiments <- function(long_text) {
+  long_text <- paste(long_text, collapse = "")
+
+  # Breaking the input text into character vectors of length.segm characters each
+  char.segments <- function(x, segm.length) {
+    byte.counter <- nchar(x, type = "bytes")
+    f <- c(1, rep(0, segm.length - 1))
+    f <- cumsum(rep(f, length.out = byte.counter))
+    s <- split(unlist(strsplit(x, "")), f)
+    unname(sapply(s, paste, collapse = ""))
+  }
+
+  five.thousand.byte.chunk <- char.segments(long_text, 5000)
+
+  # Iterating through the chunks
+  for (i in 1:length(five.thousand.byte.chunk)) {
+    current_chunk <- five.thousand.byte.chunk[i]
+    if (current_chunk > "") {
+      # Some cats so that you can see the chunks and their byte sum
+
+      df <- detect_sentiment(current_chunk)
+      df$text <- current_chunk
+
+      if (!exists("sentinent_df")) {
+        sentinent_df <- df
+      } else {
+        sentinent_df <- rbind(sentinent_df, df)
+      }
+    }
+  }
+
+  return(sentinent_df)
+}
+
+get_translation <- function(long_text) {
+  long_text <- paste(long_text, collapse = "")
+
+  # Breaking the input text into character vectors of length.segm characters each
+  char.segments <- function(x, segm.length) {
+    byte.counter <- nchar(x, type = "bytes")
+    f <- c(1, rep(0, segm.length - 1))
+    f <- cumsum(rep(f, length.out = byte.counter))
+    s <- split(unlist(strsplit(x, "")), f)
+    unname(sapply(s, paste, collapse = ""))
+  }
+
+  five.thousand.byte.chunk <- char.segments(long_text, 5000)
+
+  # Iterating through the chunks
+  for (i in 1:length(five.thousand.byte.chunk)) {
+    current_chunk <- five.thousand.byte.chunk[i]
+    if (current_chunk > "") {
+      # Some cats so that you can see the chunks and their byte sum
+
+      df <- translate(current_chunk, from = "hu", to = "en")
+      df$text <- current_chunk
+
+      if (!exists("translation_df")) {
+        translation_df <- df
+      } else {
+        translation_df <- rbind(translation_df, df)
+      }
+    }
+  }
+  return(translation_df[1])
+}
+
+csvname <- paste0("scrappednews.csv")
+df <- read.csv(csvname, na.strings = c("", "NA"))
+
+df <- df %>% subset(select = -X)
+df <- df %>% filter(huntext != "NA")
+df <- df %>%
+  group_by(huntext) %>%
+  slice(1)
+df <- df %>% filter(str_detect(date, "november"))
+df <- df %>% mutate(year = substr(date, 1, 4))
+
+df <- df %>% mutate(entext = get_translation(huntext))
+
+# csvname <- paste0("scrappednewstranslated.csv")
+# df2 <- apply(df,2,as.character)
+# write.csv(df2, csvname)
+detect_language("good morning")
+df <- df %>% mutate(entexttrue = detect_language(substr(entext, 1, 200))$LanguageCode)
+df <- df %>% filter(entexttrue == "en")
+df <- df %>% mutate(sentiment = get_sentiments(entext))
+df <- df %>%
+  mutate(
+    sentiment_index = sentiment$Index,
+    sentiment_sentiment = sentiment$Sentiment,
+    sentiment_mixed = sentiment$Mixed,
+    sentiment_negative = sentiment$Negative,
+    sentiment_neutral = sentiment$Neutral,
+    sentiment_positive = sentiment$Positive
+  ) %>%
+  subset(select = -sentiment)
+
+
+
+csvname <- paste0("scrappednewssentinent.csv")
+df2 <- df %>%
+  subset(select = -entext) %>%
+  subset(select = -huntext)
+write.csv(df2, csvname)
+head(df)
+```
+
+```{r}
+chart_data <- df %>% mutate(year_type = paste(year, type))
+ggplot(chart_data, aes(x = year_type, fill = year_type)) +
+  geom_histogram(stat = "count")
+ggsave("histogram.png")
+```
+
+
+```{r}
+ggplot(chart_data, aes(x = sentiment_sentiment, fill = sentiment_sentiment)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(vars(year_type)) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+ggsave("sentimen.png")
+```
+
+```{r}
+ggplot(chart_data, aes(x = factor(author), fill = author)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(vars(type)) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+ggsave("authors.png")
+```
